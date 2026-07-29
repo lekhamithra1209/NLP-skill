@@ -1,0 +1,98 @@
+import pandas as pd
+import re
+import nltk
+
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+
+from sklearn.metrics import accuracy_score
+from sklearn.metrics import precision_score
+from sklearn.metrics import recall_score
+from sklearn.metrics import f1_score
+from sklearn.metrics import confusion_matrix
+from sklearn.metrics import classification_report
+
+nltk.download('punkt')
+nltk.download('stopwords')
+
+df = pd.read_csv("IMDB Dataset.csv")
+
+print(df.shape)
+print(df.head())
+
+print(df.isnull().sum())
+print(df['sentiment'].value_counts())
+
+stop_words = set(stopwords.words('english'))
+stemmer = PorterStemmer()
+
+def preprocess(text):
+    text = text.lower()
+    text = re.sub(r'<.*?>', '', text)
+    text = re.sub(r'[^a-zA-Z]', ' ', text)
+    words = word_tokenize(text)
+    words = [word for word in words if word not in stop_words]
+    words = [stemmer.stem(word) for word in words]
+    return " ".join(words)
+
+df['clean_review'] = df['review'].apply(preprocess)
+
+df['sentiment'] = df['sentiment'].map({
+    'positive': 1,
+    'negative': 0
+})
+
+tfidf = TfidfVectorizer(max_features=5000)
+
+X = tfidf.fit_transform(df['clean_review'])
+y = df['sentiment']
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size=0.2,
+    random_state=42
+)
+
+model = LogisticRegression(max_iter=1000)
+
+model.fit(X_train, y_train)
+
+y_pred = model.predict(X_test)
+
+accuracy = accuracy_score(y_test, y_pred)
+precision = precision_score(y_test, y_pred)
+recall = recall_score(y_test, y_pred)
+f1 = f1_score(y_test, y_pred)
+
+print("Accuracy:", accuracy)
+print("Precision:", precision)
+print("Recall:", recall)
+print("F1 Score:", f1)
+
+print(confusion_matrix(y_test, y_pred))
+
+print(classification_report(y_test, y_pred))
+
+def predict_sentiment(review):
+    review = preprocess(review)
+    vector = tfidf.transform([review])
+    prediction = model.predict(vector)
+
+    if prediction[0] == 1:
+        return "Positive"
+    else:
+        return "Negative"
+
+review1 = "This movie was absolutely amazing. I loved every scene."
+review2 = "Worst movie ever. Waste of time."
+review3 = "The acting was good but the story was boring."
+
+print(predict_sentiment(review1))
+print(predict_sentiment(review2))
+print(predict_sentiment(review3))
