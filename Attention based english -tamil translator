@@ -1,0 +1,461 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+from datasets import load_dataset
+from collections import Counter
+import re
+import random
+import matplotlib.pyplot as plt
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+dataset = load_dataset("Helsinki-NLP/opus-100", "en-ta")
+
+train_data = dataset["train"].select(range(min(3000, len(dataset["train"]))))
+test_data = dataset["test"].select(range(min(300, len(dataset["test"]))))
+
+def clean_text(text):
+    text = text.lower()
+    text = re.sub(r"[^a-zA-Z\u0B80-\u0BFF\s]", "", text)
+    return text.strip()
+
+english_sentences = []
+tamil_sentences = []
+
+for item in train_data:
+    english = clean_text(item["translation"]["en"])
+    tamil = clean_text(item["translation"]["ta"])
+
+    if english and tamil:
+        english_sentences.append(english)
+        tamil_sentences.append(tamil)
+
+eng_counter = Counter()
+tam_counter = Counter()
+
+for sentence in english_sentences:
+    eng_counter.update(sentence.split())
+
+for sentence in tamil_sentences:
+    tam_counter.update(sentence.split())
+
+eng_vocab = {
+    "<PAD>": 0,
+    "<START>": 1,
+    "<END>": 2,
+    "<UNK>": 3
+}
+
+tam_vocab = {
+    "<PAD>": 0,
+    "<START>": 1,
+    "<END>": 2,
+    "<UNK>": 3
+}
+
+for word in eng_counter:
+    eng_vocab[word] = len(eng_vocab)
+
+for word in tam_counter:
+    tam_vocab[word] = len(tam_vocab)
+
+eng_reverse = {v: k for k, v in eng_vocab.items()}
+tam_reverse = {v: k for k, v in tam_vocab.items()}
+
+max_eng_len = 20
+max_tam_len = 20
+
+def encode_sentence(sentence, vocab, max_len):
+    words = sentence.split()
+    ids = [vocab["<START>"]]
+
+    for word in words[:max_len - 2]:
+        ids.append(vocab.get(word, vocab["<UNK>"]))
+
+    ids.append(vocab["<END>"])
+
+    while len(ids) < max_len:
+        ids.append(vocab["<PAD>"])
+
+    return ids
+
+X = []
+Y = []
+
+for eng, tam in zip(english_sentences, tamil_sentences):
+    X.append(encode_sentence(eng, eng_vocab, max_eng_len))
+    Y.append(encode_sentence(tam, tam_vocab, max_tam_len))
+
+X = torch.tensor(X, dtype=torch.long)
+Y = torch.tensor(Y, dtype=torch.long)
+
+train_dataset = TensorDataset(X, Y)
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+
+class Encoder(nn.Module):
+
+    def __init__(self, input_size, embedding_size, hidden_size):
+        super().__init__()
+
+        self.embedding = nn.Embedding(
+            input_size,
+            embedding_size,
+            padding_idx=0
+        )
+
+        self.lstm = nn.LSTM(
+            embedding_size,
+            hidden_size,
+            batch_first=True
+        )
+
+    def forward(self, x):
+        embedded = self.embedding(x)
+        outputs, (hidden, cell) = self.lstm(embedded)
+        return outputs, hidden, cell
+
+class Attention(nn.Module):
+
+    def __init__(self, hidden_size):
+        super().__init__()
+
+        self.attention = nn.Linear(
+            hidden_size * 2,
+            hidden_size
+        )
+
+        self.v = nn.Linear(
+            hidden_size,
+            1,
+            bias=False
+        )
+
+    def forward(self, hidden, encoder_outputs):
+
+        seq_len = encoder_outputs.size(1)
+
+        hidden = hidden[-1].unsqueeze(1)
+        hidden = hidden.repeat(1, seq_len, 1)
+
+        energy = torch.tanh(
+            self.attention(
+                torch.cat((hidden, encoder_outputs), dim=2)
+            )
+        )
+
+        scores = self.v(energy).squeeze(2)
+
+        weights = torch.softmax(scores, dim=1)
+
+        context = torch.bmm(
+            weights.unsqueeze(1),
+            encoder_outputs
+        )
+
+        return context, weights
+
+class Decoder(nn.Module):
+
+    def __init__(
+        self,
+        output_size,
+        embedding_size,
+        hidden_size
+    ):
+        super().__init__()
+
+        self.embedding = nn.Embedding(
+            output_size,
+            embedding_size,
+            padding_idx=0
+        )
+
+        self.attention = Attention(hidden_size)
+
+        self.lstm = nn.LSTM(
+            embedding_size + hidden_size,
+            hidden_size,
+            batch_first=True
+        )
+
+        self.fc = nn.Linear(
+            embedding_size + hidden_size * 2,
+            output_size
+        )
+
+    def forward(
+        self,
+        input_token,
+        hidden,
+        cell,
+        encoder_outputs
+    ):
+
+        embedded = self.embedding(input_token)
+
+        context, attention_weights = self.attention(
+            hidden,
+            encoder_outputs
+        )
+
+        lstm_input = torch.cat(
+            (embedded, context),
+            dim=2
+        )
+
+        output, (hidden, cell) = self.lstm(
+            lstm_input,
+            (hidden, cell)
+        )
+
+        prediction = self.fc(
+            torch.cat(
+                (output, context, embedded),
+                dim=2
+            )
+        )
+
+        return prediction, hidden, cell, attention_weights
+
+class Seq2Seq(nn.Module):
+
+    def __init__(
+        self,
+        encoder,
+        decoder
+    ):
+        super().__init__()
+
+        self.encoder = encoder
+        self.decoder = decoder
+
+    def forward(self, source, target, teacher_forcing=0.5):
+
+        batch_size = source.size(0)
+        target_len = target.size(1)
+        target_vocab_size = len(tam_vocab)
+
+        outputs = torch.zeros(
+            batch_size,
+            target_len,
+            target_vocab_size
+        ).to(device)
+
+        encoder_outputs, hidden, cell = self.encoder(source)
+
+        input_token = target[:, 0].unsqueeze(1)
+
+        for t in range(1, target_len):
+
+            output, hidden, cell, attention_weights = self.decoder(
+                input_token,
+                hidden,
+                cell,
+                encoder_outputs
+            )
+
+            outputs[:, t] = output.squeeze(1)
+
+            best_guess = output.argmax(2)
+
+            input_token = (
+                target[:, t].unsqueeze(1)
+                if random.random() < teacher_forcing
+                else best_guess
+            )
+
+        return outputs
+
+encoder = Encoder(
+    len(eng_vocab),
+    128,
+    256
+).to(device)
+
+decoder = Decoder(
+    len(tam_vocab),
+    128,
+    256
+).to(device)
+
+model = Seq2Seq(
+    encoder,
+    decoder
+).to(device)
+
+optimizer = optim.Adam(
+    model.parameters(),
+    lr=0.001
+)
+
+criterion = nn.CrossEntropyLoss(
+    ignore_index=tam_vocab["<PAD>"]
+)
+
+epochs = 5
+
+for epoch in range(epochs):
+
+    model.train()
+    total_loss = 0
+
+    for source, target in train_loader:
+
+        source = source.to(device)
+        target = target.to(device)
+
+        optimizer.zero_grad()
+
+        output = model(
+            source,
+            target
+        )
+
+        output = output[:, 1:].reshape(
+            -1,
+            output.size(2)
+        )
+
+        target = target[:, 1:].reshape(-1)
+
+        loss = criterion(
+            output,
+            target
+        )
+
+        loss.backward()
+
+        optimizer.step()
+
+        total_loss += loss.item()
+
+    print(
+        "Epoch:",
+        epoch + 1,
+        "Loss:",
+        round(total_loss / len(train_loader), 4)
+    )
+
+def translate(sentence):
+
+    model.eval()
+
+    sentence = clean_text(sentence)
+
+    source_ids = encode_sentence(
+        sentence,
+        eng_vocab,
+        max_eng_len
+    )
+
+    source = torch.tensor(
+        [source_ids],
+        dtype=torch.long
+    ).to(device)
+
+    with torch.no_grad():
+        encoder_outputs, hidden, cell = model.encoder(source)
+
+    input_token = torch.tensor(
+        [[tam_vocab["<START>"]]],
+        dtype=torch.long
+    ).to(device)
+
+    result = []
+    attention_values = []
+
+    for _ in range(max_tam_len):
+
+        with torch.no_grad():
+
+            output, hidden, cell, attention_weights = model.decoder(
+                input_token,
+                hidden,
+                cell,
+                encoder_outputs
+            )
+
+        prediction = output.argmax(2)
+
+        word_id = prediction.item()
+
+        if word_id == tam_vocab["<END>"]:
+            break
+
+        if word_id != tam_vocab["<PAD>"]:
+            result.append(
+                tam_reverse.get(
+                    word_id,
+                    "<UNK>"
+                )
+            )
+
+        attention_values.append(
+            attention_weights.squeeze().cpu().numpy()
+        )
+
+        input_token = prediction
+
+    return " ".join(result), attention_values
+
+print("\nEnglish-Tamil Translator")
+
+sentence = input("Enter an English sentence: ")
+
+translation, attention = translate(sentence)
+
+print("\nInput:", sentence)
+print("Tamil Translation:", translation)
+
+if attention:
+
+    attention_matrix = torch.tensor(attention).numpy()
+
+    source_words = clean_text(sentence).split()
+    target_words = translation.split()
+
+    plt.figure(figsize=(10, 6))
+    plt.imshow(attention_matrix, aspect="auto")
+    plt.xticks(
+        range(len(source_words)),
+        source_words,
+        rotation=45
+    )
+    plt.yticks(
+        range(len(target_words)),
+        target_words
+    )
+    plt.xlabel("English Source Words")
+    plt.ylabel("Tamil Output Words")
+    plt.title("Attention Weights")
+    plt.colorbar()
+    plt.show()
+
+correct = 0
+total = 0
+
+for item in test_data:
+
+    english = clean_text(item["translation"]["en"])
+    actual_tamil = clean_text(item["translation"]["ta"])
+
+    if not english or not actual_tamil:
+        continue
+
+    predicted_tamil, _ = translate(english)
+
+    actual_words = actual_tamil.split()
+    predicted_words = predicted_tamil.split()
+
+    for word in predicted_words:
+        if word in actual_words:
+            correct += 1
+
+    total += len(actual_words)
+
+accuracy = (correct / total) * 100 if total > 0 else 0
+
+print("\nEvaluation Report")
+print("Test Samples:", len(test_data))
+print("Word Accuracy:", round(accuracy, 2), "%")
