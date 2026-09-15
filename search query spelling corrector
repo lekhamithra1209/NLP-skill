@@ -1,0 +1,56 @@
+import nltk
+from nltk.corpus import gutenberg
+
+nltk.download('gutenberg')
+
+# Load corpus
+words = gutenberg.words()
+
+# Build vocabulary
+vocabulary = set()
+
+for word in words:
+    word = word.lower()
+    if word.isalpha():
+        vocabulary.add(word)
+
+print("Vocabulary size:", len(vocabulary))
+
+# Get search query
+query = input("Enter your search query: ")
+
+# Tokenize query
+tokens = query.lower().split()
+
+# Find incorrect words
+incorrect_words = [
+    word for word in tokens
+    if word.isalpha() and word not in vocabulary
+]
+
+# Find corrections using edit distance
+corrections = {}
+
+for wrong_word in incorrect_words:
+    best_word = min(
+        vocabulary,
+        key=lambda word: nltk.edit_distance(wrong_word, word)
+    )
+    corrections[wrong_word] = best_word
+
+# Create corrected query
+corrected_query = []
+
+for word in tokens:
+    if word in corrections:
+        corrected_query.append(corrections[word])
+    else:
+        corrected_query.append(word)
+
+corrected_query = " ".join(corrected_query)
+
+# Display results
+print("\nOriginal Query:", query)
+print("Incorrect Words:", incorrect_words)
+print("Suggested Corrections:", corrections)
+print("Final Corrected Query:", corrected_query)
