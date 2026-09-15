@@ -1,0 +1,57 @@
+import re
+from itertools import combinations
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+n = int(input("Enter number of assignments: "))
+
+documents = []
+
+for i in range(n):
+    text = input("Enter Assignment " + chr(65 + i) + ": ")
+    text = text.lower()
+    text = re.sub(r'[^a-z\s]', '', text)
+    documents.append(text)
+
+vectorizer = TfidfVectorizer(stop_words='english')
+tfidf_matrix = vectorizer.fit_transform(documents)
+
+similarity_matrix = cosine_similarity(tfidf_matrix)
+
+threshold = 0.70
+
+print("\nSimilarity Matrix:")
+for i in range(n):
+    print([
+        round(similarity_matrix[i][j] * 100, 2)
+        for j in range(n)
+    ])
+
+results = []
+
+for i, j in combinations(range(n), 2):
+    score = similarity_matrix[i][j] * 100
+    results.append((score, i, j))
+
+results.sort(reverse=True)
+
+print("\nSimilarity Report:")
+
+for score, i, j in results:
+    status = "Possible Plagiarism" if score >= threshold * 100 else "Low Similarity"
+    print(
+        "Assignment " + chr(65 + i) +
+        " vs Assignment " + chr(65 + j) +
+        ": " + str(round(score, 2)) +
+        "% similarity -> " + status
+    )
+
+print("\nRanked Suspicious Document Pairs:")
+
+for rank, (score, i, j) in enumerate(results, 1):
+    print(
+        str(rank) + ". Assignment " +
+        chr(65 + i) + " vs Assignment " +
+        chr(65 + j) + " - " +
+        str(round(score, 2)) + "%"
+    )
