@@ -1,0 +1,64 @@
+import nltk
+import re
+from collections import Counter
+
+nltk.download('wikitext')
+
+from nltk.corpus import wikitext
+
+text = wikitext.raw('wikitext-2-raw-v1.txt')
+
+text = text.lower()
+text = re.sub(r'[^a-z\s]', '', text)
+
+tokens = text.split()
+
+print("Total words:", len(tokens))
+
+unigram = Counter(tokens)
+
+bigram = Counter()
+
+for i in range(len(tokens) - 1):
+    pair = (tokens[i], tokens[i + 1])
+    bigram[pair] += 1
+
+trigram = Counter()
+
+for i in range(len(tokens) - 2):
+    triple = (tokens[i], tokens[i + 1], tokens[i + 2])
+    trigram[triple] += 1
+
+sentence = input("Enter a sentence: ")
+
+sentence = sentence.lower()
+sentence = re.sub(r'[^a-z\s]', '', sentence)
+words = sentence.split()
+
+candidates = Counter()
+
+if len(words) >= 2:
+    last_two = (words[-2], words[-1])
+
+    for (w1, w2, w3), count in trigram.items():
+        if w1 == last_two[0] and w2 == last_two[1]:
+            candidates[w3] = count
+
+if not candidates and len(words) >= 1:
+    last_word = words[-1]
+
+    for (w1, w2), count in bigram.items():
+        if w1 == last_word:
+            candidates[w2] = count
+
+print("\nTop predicted next words:")
+
+if candidates:
+    total = sum(candidates.values())
+    top_words = candidates.most_common(5)
+
+    for i, (word, count) in enumerate(top_words, 1):
+        probability = count / total
+        print(i, ".", word, "-", round(probability, 3))
+else:
+    print("No prediction found.")
